@@ -271,7 +271,7 @@ write_parquet(data_cleaned, "/Users/hr/Downloads/data_cleaned.parquet")
 ```
 
 
-####################################### Data Exploration ###########################################
+####################################### Data Exploration & Visualisations ###########################################
 
 ```{r}
 data_eda=read_parquet("/Users/hr/Downloads/data_cleaned.parquet")
