@@ -1,4 +1,3 @@
-
 #Shiny app
 
 #Installing all the required packages 
