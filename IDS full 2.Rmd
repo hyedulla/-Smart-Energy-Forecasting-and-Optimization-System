@@ -1,0 +1,432 @@
+---
+title: "IDS_P1_Data_Merge"
+output: html_document
+date: "2023-12-06"
+---
+
+```{r}
+#Load the required libraries
+library(arrow) # to read the parquet files
+library(dplyr) # to merge data files by rows
+library(tidyverse) #to read CSV files
+```
+
+
+####################################### Data Merging ###########################################
+
+
+```{r}
+# Read the static house data
+static_house_info = read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet")
+
+# Create list of all house IDs
+house_id <- static_house_info$bldg_id
+
+```
+
+```{r}
+# Initialize a storage structure for the full data frame
+full_df <- list()
+n <- 0
+
+for (i in house_id) {
+  energy_url <- paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/", i, ".parquet")
+  
+  # Try to read in energy data for the specific house ID
+  tryCatch({
+    energy <- read_parquet(energy_url)
+    energy <- energy[format(energy$time, "%Y-%m") == "2018-07", ] #only keep july dates
+ 
+    energy$total_energy_consumed <- rowSums(energy[, 1:42], na.rm = TRUE)
+    energy$bldg_id <- i
+    
+    # Merge with static house information
+    energy_house_merge <- left_join(energy, static_house_info, by = 'bldg_id')
+    
+    # Merge with weather data
+    county <- energy_house_merge$in.county[1]
+    weather_url <- paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", county, ".csv")
+    weather <- read_csv(weather_url)
+    weather$in.county <- county
+    energy_house_weather_merge <- energy_house_merge %>% left_join(weather, by = c('in.county', 'time' = 'date_time'))
+    
+    # Append to the full data frame list
+    full_df[[length(full_df) + 1]] <- energy_house_weather_merge
+  }, error = function(e) {
+    message(paste("Error processing house ID", i, ":", e$message))
+  })
+  
+  # Increment counter and check progress
+  n <- n + 1
+  print(paste("Processed house ID", i, ":", n, "of", length(house_id)))
+}
+```
+
+```{r}
+# Combine all data frames into one
+data_cleaned <- bind_rows(full_df)
+```
+
+```{r}
+# Save the data frame into a parquet file
+#write_parquet(data_cleaned, "/data_merged.parquet")
+```
+
+
+####################################### Data Summarization by day ###########################################
+
+```{r}
+
+library(dplyr)
+data_merged= read_parquet("/Users/hr/Downloads/OneDrive_1_12-7-2023/data_merged.parquet")
+
+# Assuming 'data_cleaned' contains your data
+data_merged$day <- as.Date(data_merged$time, format = "%Y-%m-%d %H:%M:%S")
+
+data_summarized <- data_merged %>%
+  group_by(bldg_id, time, in.county) %>%
+  summarize(
+    total_energy_consumed = sum(total_energy_consumed, na.rm = TRUE),
+    total_energy_produced = sum(out.electricity.pv.energy_consumption, na.rm = TRUE),
+    
+    total_Direct_Normal_Radiation = sum(`Direct Normal Radiation [W/m2]`, na.rm = TRUE),
+    total_Diffuse_Horizontal_Radiation = sum(`Diffuse Horizontal Radiation [W/m2]`, na.rm = TRUE),
+    median_Dry_Bulb_Temperature = median(`Dry Bulb Temperature [°C]`, na.rm = TRUE),
+    median_Relative_Humidity = median(`Relative Humidity [%]`, na.rm = TRUE),
+    median_Wind_Speed = median(`Wind Speed [m/s]`, na.rm = TRUE),
+    median_Wind_Direction = median(`Wind Direction [Deg]`, na.rm = TRUE),
+    total_Global_Horizontal_Radiation = sum(`Global Horizontal Radiation [W/m2]`, na.rm = TRUE),
+    .groups = 'drop'  )
+
+#summary(data_summarized)
+
+```
+
+```{r}
+# Read the static house data
+static_house_info = read_parquet("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet")
+
+data_summarized <- merge(data_summarized, static_house_info, by = "bldg_id")
+```
+
+
+```{r}
+# Save the data frame into a parquet file
+write_parquet(data_summarized, "/Users/mj/Desktop/IDS_Nikitha/data_summarized.parquet")
+```
+
+####################################### Data Cleaning ###########################################
+
+```{r}
+data_summarized<- read_parquet("/Users/hr/Downloads/OneDrive_1_12-7-2023/data_summarized.parquet")
+data_cleaned <- data_summarized
+```
+
+```{r}
+# Remove Columns with Zero Variance
+data_cleaned <- data_cleaned[, sapply(data_cleaned, function(x) length(unique(x)) > 1)]
+```
+
+```{r}
+# Convert the 'in.refrigerator' column to numeric
+data_cleaned$in.refrigerator <- gsub("EF |, 100% Usage", "", data_cleaned$in.refrigerator)
+data_cleaned$in.refrigerator[data_cleaned$in.refrigerator == "None"] <- "0"
+data_cleaned$in.refrigerator <- as.numeric(data_cleaned$in.refrigerator)
+
+```
+
+```{r}
+# Define a function to convert range to mean
+range_to_mean <- function(range_str) {
+  # Handle cases where the value is greater than a number (e.g., ">100000")
+  if (grepl(">", range_str)) {
+    # Assuming ">X" means "X+1" for the purposes of finding a mean
+    return(as.numeric(gsub(">", "", range_str)) + 1)
+  }
+  
+  # Handle cases where the value is less than a number (e.g., "<3000")
+  if (grepl("<", range_str)) {
+    # Assuming "<X" means "X-1" for the purposes of finding a mean
+    return(as.numeric(gsub("<", "", range_str)) - 1)
+  }
+
+  # Split the string on the hyphen
+  parts <- strsplit(range_str, "-")[[1]]
+  
+  # Remove any '+' signs and convert to numeric
+  parts <- as.numeric(gsub("\\+", "", parts))
+  
+  # Calculate the mean of the two numbers
+  if (length(parts) == 2) {
+    return(mean(parts))
+  } else {
+    # If there's no range, just return the number itself
+    return(parts[1])
+  }
+}
+
+# Apply this function to each of the specified columns
+data_cleaned$in.income <- sapply(data_cleaned$in.income, range_to_mean)
+data_cleaned$in.income_recs_2015 <- sapply(data_cleaned$in.income_recs_2015, range_to_mean)
+data_cleaned$in.income_recs_2020 <- sapply(data_cleaned$in.income_recs_2020, range_to_mean)
+
+```
+
+
+```{r}
+# Remove 'Hour' prefix and convert to numeric
+data_cleaned$in.bathroom_spot_vent_hour <- as.numeric(sub("Hour", "", data_cleaned$in.bathroom_spot_vent_hour))
+
+# Now, the column 'in.bathroom_spot_vent_hour' should be numeric
+data_cleaned$in.range_spot_vent_hour <- as.numeric(sub("Hour", "", data_cleaned$in.range_spot_vent_hour))
+
+data_cleaned$in.cooling_setpoint <- as.numeric(sub("F", "", data_cleaned$in.cooling_setpoint))
+
+data_cleaned$in.cooling_setpoint_offset_magnitude <- as.numeric(sub("F", "", data_cleaned$in.cooling_setpoint_offset_magnitude))
+
+data_cleaned$in.heating_setpoint <- as.numeric(sub("F", "", data_cleaned$in.heating_setpoint))
+
+data_cleaned$in.heating_setpoint_offset_magnitude <- as.numeric(sub("F", "", data_cleaned$in.heating_setpoint_offset_magnitude))
+
+data_cleaned$in.infiltration <- as.numeric(sub(" ACH50", "", data_cleaned$in.infiltration))
+
+data_cleaned$in.infiltration <- as.numeric(sub(" ACH50", "", data_cleaned$in.infiltration))
+```
+
+```{r}
+# Remove 'Car' and convert the remaining part to numeric, replace 'None' with 0
+data_cleaned$in.geometry_garage <- ifelse(data_cleaned$in.geometry_garage == "None", 0, as.numeric(gsub(" Car", "", data_cleaned$in.geometry_garage)))
+
+```
+
+```{r}
+# Create a new column 'energy_usage_group' based on these thresholds
+low_threshold <- 0.726
+medium_threshold <- 1.059
+high_threshold <- 1.559
+
+data_cleaned$energy_usage_group <- dplyr::case_when(
+  data_cleaned$total_energy_consumed < low_threshold ~ 'Low',
+  data_cleaned$total_energy_consumed >= low_threshold & data_cleaned$total_energy_consumed < medium_threshold ~ 'Medium',
+  data_cleaned$total_energy_consumed >= medium_threshold & data_cleaned$total_energy_consumed < high_threshold ~ 'High',
+  data_cleaned$total_energy_consumed >= high_threshold ~ 'Very High',
+  TRUE ~ 'Unknown'
+)
+
+
+data_cleaned$building_size <- cut(data_cleaned$in.sqft,
+                                       breaks=c(min(data_cleaned$in.sqft), 1220, 2176, max(data_cleaned$in.sqft)),
+                                       labels=c("Small", "Medium", "Large"),
+                                       include.lowest=TRUE)
+```
+
+```{r}
+# Impute missing values
+data_cleaned <- data_cleaned %>%
+  # Impute numeric columns with their mean
+  mutate_if(is.numeric, ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)) %>%
+  # Impute categorical columns with the mode (most frequent value)
+  mutate_if(is.character, function(x) {
+    mode_value <- names(sort(table(x), decreasing = TRUE))[1]
+    ifelse(is.na(x), mode_value, x)
+  })
+```
+
+```{r}
+# Calculate Percentage of Missing Data
+missing_percentage <- data_cleaned %>% 
+  summarise(across(where(is.character), ~sum(is.na(.))/n()*100))
+
+#View(missing_percentage)
+# no missing categorical data
+
+#Check for non-standard missing values and replace them with NA
+data_cleaned <- data_cleaned %>% 
+  mutate(across(where(is.character), ~na_if(., ""))) # Replace empty strings with NA
+
+# Calculate the percentage of missing data for each column
+missing_percentage <- colSums(is.na(data_cleaned)) / nrow(data_cleaned) * 100
+
+# Identify columns where more than 70% of data is missing
+columns_to_remove <- names(missing_percentage[missing_percentage > 70])
+
+# Remove these columns from the dataframe
+data_cleaned <- data_cleaned[, !(names(data_cleaned) %in% columns_to_remove)]
+
+# Function to calculate the mode
+get_mode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Replace NA in each column with its mode
+data_cleaned <- data_cleaned %>%
+  mutate(across(where(is.character), ~ifelse(is.na(.), get_mode(.), .)))
+
+```
+
+```{r}
+# Save the data frame into a parquet file
+write_parquet(data_cleaned, "/Users/hr/Downloads/data_cleaned.parquet")
+```
+
+
+####################################### Data Exploration ###########################################
+
+```{r}
+data_eda=read_parquet("/Users/hr/Downloads/data_cleaned.parquet")
+```
+
+```{r}
+ggplot(data_eda, aes(x = in.weather_file_city, fill = in.heating_fuel)) + 
+  geom_bar() + 
+  labs(title = "Types of Fuels", x = "City") + 
+  guides(color = guide_legend(title = "Fuel Type")) +
+  theme(plot.title = element_text(hjust = 0.5),axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+ggplot(data_eda, aes(x = as.factor(in.geometry_stories), 
+                      y = total_energy_consumed)) + 
+  geom_boxplot() + 
+  labs(title = "Energy Consumption in One and Two Story Buildings", 
+       x = "Stories", y = "Energy Consumption") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+#Create a heatmap using ggplot2 to visualize the correlation matrix
+
+# Calculate the correlation matrix
+library(reshape2)
+weather_columns <- c(
+  
+  'total_Diffuse_Horizontal_Radiation',
+  'total_Direct_Normal_Radiation',
+  'median_Dry_Bulb_Temperature',
+  'median_Relative_Humidity',
+  'median_Wind_Speed',
+  'median_Wind_Direction',
+  'total_Global_Horizontal_Radiation'
+)
+
+weather_and_energy_df <- data_eda[, c(weather_columns, 'total_energy_consumed')]
+correlation_matrix <- cor(weather_and_energy_df)
+ggplot(data = melt(correlation_matrix), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  theme_minimal() +
+  labs(x = "Variables", y = "Variables", fill = "Correlation") +
+  ggtitle("Correlation Matrix Between Weather Data and Total Energy Usage") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Assuming you have data_eda dataframe and you need to create average_temp_by_day and average_electricity_by_day data frames
+
+# Example of creating these data frames
+# Replace this with your actual calculations based on your data
+average_temp_by_day <- data_eda %>%
+  group_by(time) %>%
+  summarize(average_temperature = mean(median_Dry_Bulb_Temperature, na.rm = TRUE))
+
+average_electricity_by_day <- data_eda %>%
+  group_by(time) %>%
+  summarize(average_electricity = mean(total_energy_consumed, na.rm = TRUE))
+
+# Scale factor for the secondary axis
+# This needs to be adjusted based on the relationship between temperature and electricity scales
+scale_factor <- max(average_temp_by_day$average_temperature) / max(average_electricity_by_day$average_electricity)
+
+# Plot with two axes
+ggplot() +
+  geom_line(data = average_temp_by_day, aes(x = time, y = average_temperature), color = "blue", size = 1) +
+  geom_line(data = average_electricity_by_day, aes(x = time, y = average_electricity * scale_factor), color = "red", size = 1) +
+  labs(x = "Date", 
+       y = "Average Temperature (°C)", 
+       title = "Average Temperature and Electricity Over Time", 
+       subtitle = "Scaled Comparison of Temperature and Electricity Usage",
+       color = "Variable") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  scale_y_continuous(
+    name = "Average Temperature (°C)",
+    sec.axis = sec_axis(~ . / scale_factor, name = "Average Electricity (kWh)")
+  )
+
+
+```
+
+```{r}
+ggplot(data_eda, aes(x = in.weather_file_city, 
+                     y = (total_energy_consumed-total_energy_produced))) + 
+  geom_bar(stat = "identity", fill = "blue") +
+  geom_line(aes(y = total_energy_produced), color = "red", size = 1) +
+  labs(title = "Energy Consumption and Production by City", 
+       x = "City", y = "Total Energy") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# we can see that the enrgy consumption in Daniel Field, Maxton, and Rutherfordton are low as they are good producers of renewable energy
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Calculate the average of median_Dry_Bulb_Temperature for each unique time
+average_temperatures <- data_eda %>%
+  group_by(time) %>%
+  summarize(average_temperature = mean(median_Dry_Bulb_Temperature, na.rm = TRUE))
+
+# Create a line graph of the average temperatures over time
+ggplot(average_temperatures, aes(x = time, y = average_temperature)) +
+  geom_line() +
+  xlab("Date and Time") +
+  ylab("Average Dry Bulb Temperature (°C)") +
+  ggtitle("Line Graph: Average Dry Bulb Temperature Over Time")
+
+
+
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+
+# Filter for appliance columns and the total energy consumed column
+appliance_cols <- grep("out.electricity", names(data_eda), value = TRUE)
+energy_cols <- c(appliance_cols, "total_energy_consumed")
+
+# Compute the correlation matrix for these columns
+correlation_matrix <- cor(data_eda[, energy_cols], use = "complete.obs")
+
+# Melt the correlation matrix for visualization
+melted_correlation_matrix <- melt(correlation_matrix)
+
+# Filter to keep only correlations with 'total_energy_consumed'
+filtered_correlation_matrix <- melted_correlation_matrix[melted_correlation_matrix$Var2 == "total_energy_consumed" & melted_correlation_matrix$Var1 != "total_energy_consumed",]
+
+# Create a heatmap of the correlation matrix
+ggplot(filtered_correlation_matrix, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  labs(x = "Appliances", y = "Total Energy Consumed", fill = "Correlation") +
+  ggtitle("Correlation Heatmap: Appliances vs Total Energy Usage") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+####################################### Data Moddelling ###########################################
+
+str(data_eda)
+
