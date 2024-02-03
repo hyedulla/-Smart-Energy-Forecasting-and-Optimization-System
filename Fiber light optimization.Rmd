@@ -426,7 +426,3 @@ ggplot(filtered_correlation_matrix, aes(Var1, Var2, fill = value)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 ```
-####################################### Data Moddelling ###########################################
-
-str(data_eda)
-
